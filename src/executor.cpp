@@ -12,6 +12,10 @@
 #include "devices/cuda/cudadevice.h"
 #include "devices/cuda/fastllm-cuda.cuh"
 #endif
+#ifdef USE_ROCM
+#include "devices/cuda/cudadevice.h"
+#include "devices/cuda/fastllm-cuda.h"
+#endif
 
 namespace fastllm {
     Executor::Executor() {
