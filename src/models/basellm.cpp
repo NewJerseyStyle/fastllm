@@ -6,6 +6,9 @@
 #include "utils.h"
 #include <sstream>
 
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
