@@ -5,7 +5,12 @@
 #include "devices/cpu/cpudevice.h"
 #include "devices/cuda/cudadevice.h"
 
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#else
 #include "fastllm-cuda.cuh"
+#endif
+
 #include "utils.h"
 
 namespace fastllm {
