@@ -33,6 +33,9 @@
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 
 namespace fastllm {
     std::map <std::string, int> defaultDeviceMap;
