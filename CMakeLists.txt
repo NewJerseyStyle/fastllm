@@ -62,7 +62,7 @@ if (USE_ROCM)
         set(CMAKE_HIP_ARCHITECTURES "gfx900") #vega56
         set(DEPENDENCIES roc::hipblas)
 
-        ##include_directories(include/devices/cuda)
+        include_directories(include/devices/cuda)
         ###message(${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
         ##set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp src/devices/cuda/fastllm-cuda.cpp)
         ##set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} hipblas)
