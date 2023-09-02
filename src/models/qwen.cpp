@@ -139,7 +139,7 @@ namespace fastllm {
             value.Reshape(qkvSize);
 
             int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             unitLen = 128;
 #endif
             while ((pastKey.dims.size() == 0 && (pastKey.expansionDims.size() == 0 || key.dims[1] > pastKey.expansionDims[1]))
@@ -308,7 +308,7 @@ namespace fastllm {
                 value.Reshape(qkvSize);
 
                 int unitLen = 64;
-    #ifdef USE_CUDA
+    #if defined(USE_CUDA) || defined(USE_ROCM)
                 unitLen = 128;
     #endif
                 while ((pastKey.dims.size() == 0 && (pastKey.expansionDims.size() == 0 || key.dims[1] > pastKey.expansionDims[1]))
