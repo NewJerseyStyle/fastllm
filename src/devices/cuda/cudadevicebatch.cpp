@@ -5,9 +5,9 @@
 #include "devices/cpu/cpudevice.h"
 #include "devices/cuda/cudadevice.h"
 
-#ifdef USE_ROCM
+#if defined(USE_ROCM)
 #include "fastllm-cuda.h"
-#else
+#elif defined(USE_CUDA)
 #include "fastllm-cuda.cuh"
 #endif
 
