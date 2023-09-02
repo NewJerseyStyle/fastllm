@@ -367,7 +367,7 @@ namespace fastllm {
         if (this->dataDevice == DataDevice::CPU) {
             this->cpuData = new uint8_t[this->expansionBytes];
         } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             this->cudaData = FastllmCudaMalloc(this->expansionBytes);
 #else
             ErrorInFastLLM("Error: cuda is not supported.\n");
@@ -381,7 +381,7 @@ namespace fastllm {
         if (this->dataDevice == DataDevice::CPU) {
             delete[] this->cpuData;
         } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             FastllmCudaFree(this->cudaData);
 #else
             ErrorInFastLLM("Error: cuda is not supported.\n");
@@ -462,7 +462,7 @@ namespace fastllm {
                 }
                 delete[] old;
             } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                 uint8_t *old = (uint8_t*)this->cudaData;
                 MallocSpace(this->strides[0] * std::max(this->dims[0], dims[0]));
                 int outer = this->Count(0) / this->Count(axis);
@@ -486,7 +486,7 @@ namespace fastllm {
 #ifndef USE_MMAP
         delete[] this->cpuData;
 #endif
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         if (this->cudaData != nullptr) {
             FastllmCudaFree(this->cudaData);
         }
@@ -661,7 +661,7 @@ namespace fastllm {
         }
 
         if (this->expansionBytes != 0) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             if (this->dataDevice == DataDevice::CPU) {
                 if (device == DataDevice::CUDA) {
                     FastllmCudaSetDevice(deviceIds.size() == 0 ? 0 : deviceIds[0]);
