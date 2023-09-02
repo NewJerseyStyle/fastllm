@@ -57,6 +57,7 @@ if (USE_ROCM)
         message(STATUS "HIP and hipBLAS found")
         add_compile_definitions(GGML_USE_HIPBLAS GGML_USE_CUBLAS)
         add_compile_definitions(__HIP_PLATFORM_AMD__)
+        add_compile_definitions(USE_ROCM)
         
         set(CMAKE_HIP_ARCHITECTURES "gfx900") #vega56
         set(DEPENDENCIES roc::hipblas)
