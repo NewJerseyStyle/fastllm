@@ -8,9 +8,13 @@ option(USE_ROCM "use rocm" OFF)
 option(PY_API "python api" OFF)
 option(USE_MMAP "use mmap" OFF)
 
+option(USE_SENTENCEPIECE "use sentencepiece" OFF)
+
 message(STATUS "USE_CUDA: ${USE_CUDA}")
 
 message(STATUS "PYTHON_API: ${PY_API}")
+
+message(STATUS "USE_SENTENCEPIECE: ${USE_SENTENCEPIECE}")
 
 set(CMAKE_BUILD_TYPE "Release")
 
@@ -26,7 +30,7 @@ endif()
 message(STATUS "CMAKE_CXX_FLAGS" ${CMAKE_CXX_FLAGS})
 set(FASTLLM_CXX_SOURCES src/fastllm.cpp src/device.cpp src/model.cpp src/executor.cpp
         src/devices/cpu/cpudevice.cpp src/devices/cpu/cpudevicebatch.cpp
-        src/models/chatglm.cpp src/models/moss.cpp src/models/llama.cpp src/models/qwen.cpp src/models/basellm.cpp)
+        src/models/chatglm.cpp src/models/moss.cpp src/models/llama.cpp src/models/qwen.cpp src/models/basellm.cpp src/models/glm.cpp)
 
 include_directories(include)
 include_directories(include/utils)
@@ -34,6 +38,12 @@ include_directories(include/models)
 
 if (USE_MMAP)
     add_compile_definitions(USE_MMAP)
+endif()
+
+if (USE_SENTENCEPIECE)
+    set(CMAKE_CXX_STANDARD 17)
+    add_compile_definitions(USE_SENTENCEPIECE)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} sentencepiece)
 endif()
 
 if (USE_CUDA)
@@ -98,6 +108,9 @@ target_link_libraries(main fastllm)
 add_executable(quant tools/src/quant.cpp)
 target_link_libraries(quant fastllm)
 
+add_executable(testOps test/ops/cppOps.cpp)
+target_link_libraries(testOps fastllm)
+
 add_executable(webui example/webui/webui.cpp)
 target_link_libraries(webui fastllm)
 add_custom_command(
@@ -109,6 +122,9 @@ add_custom_command(
 
 add_executable(benchmark example/benchmark/benchmark.cpp)
 target_link_libraries(benchmark fastllm)
+
+add_executable(apiserver example/apiserver/apiserver.cpp example/apiserver/json11.cpp)
+target_link_libraries(apiserver fastllm)
 
 add_library(fastllm_tools SHARED ${FASTLLM_CXX_SOURCES} ${FASTLLM_CUDA_SOURCES} tools/src/pytools.cpp)
 target_link_libraries(fastllm_tools PUBLIC ${FASTLLM_LINKED_LIBS})

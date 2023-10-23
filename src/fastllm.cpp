@@ -250,6 +250,7 @@ namespace fastllm {
     }
 
     Data::Data(fastllm::DataType type, const std::vector<int> &dims, const std::vector<float> &data) : Data::Data(type, dims) {
+        // std::cout<<"调用数值构造"<<std::endl;
         this->Allocate();
         if (type == DataType::FLOAT32) {
             std::memcpy(this->cpuData, data.data(), this->GetBytes());
@@ -261,6 +262,7 @@ namespace fastllm {
     }
 
     void Data::CopyFrom(const Data &ori) {
+        // std::cout<<"调用拷贝构造"<<std::endl;
         if (ori.dims != this->dims || this->cpuData == nullptr) {
             if (ori.dims.size() == 0) {
                 delete[] this->cpuData;
@@ -328,6 +330,9 @@ namespace fastllm {
     }
 
     void Data::Reshape(const std::vector<int> &dims) {
+        if (this->dims == dims) {
+            return;
+        }
         std::vector <int> outputDims = dims;
         uint64_t old = 1;
         for (int i : this->dims) {
@@ -368,7 +373,11 @@ namespace fastllm {
             this->cpuData = new uint8_t[this->expansionBytes];
         } else if (this->dataDevice == DataDevice::CUDA) {
 #if defined(USE_CUDA) || defined(USE_ROCM)
-            this->cudaData = FastllmCudaMalloc(this->expansionBytes);
+            if (this->directMemory) {
+                this->cudaData = FastllmCudaDirectMalloc(this->expansionBytes);
+            } else {
+                this->cudaData = FastllmCudaMalloc(this->expansionBytes);
+            }
 #else
             ErrorInFastLLM("Error: cuda is not supported.\n");
 #endif
@@ -382,7 +391,11 @@ namespace fastllm {
             delete[] this->cpuData;
         } else if (this->dataDevice == DataDevice::CUDA) {
 #if defined(USE_CUDA) || defined(USE_ROCM)
-            FastllmCudaFree(this->cudaData);
+            if (this->directMemory) {
+                FastllmCudaDirectFree(this->cudaData);
+            } else {
+                FastllmCudaFree(this->cudaData);
+            }
 #else
             ErrorInFastLLM("Error: cuda is not supported.\n");
 #endif
@@ -415,6 +428,7 @@ namespace fastllm {
 
     void Data::Expansion(const std::vector<int> &dims) {
         if (this->dims.size() == 0) {
+            this->directMemory = true;
             this->strides.resize(dims.size(), 1);
             this->strides.back() = 1;
             for (int i = dims.size() - 2; i >= 0; i--) {
@@ -489,6 +503,11 @@ namespace fastllm {
 #if defined(USE_CUDA) || defined(USE_ROCM)
         if (this->cudaData != nullptr) {
             FastllmCudaFree(this->cudaData);
+            /*if (this->directMemory) {
+                FastllmCudaDirectFree(this->cudaData);
+            } else {
+                FastllmCudaFree(this->cudaData);
+            }*/
         }
 #endif
     }
@@ -499,6 +518,10 @@ namespace fastllm {
             printf("%d ", i);
         }
         printf("\n");
+    }
+
+    std::vector<int> Data::Shape() const{
+        return this->dims;
     }
 
     void Data::Print() const {
@@ -548,7 +571,7 @@ namespace fastllm {
             weightSum.resize(n);
             for (int i = 0; i < n; i++) {
                 int j = 0;
-#ifdef __AVX__
+#ifdef __AVX2__
                 __m256i acc = _mm256_setzero_si256();
                 const __m256i ones = _mm256_set1_epi16(1);
                 for (; j + 31 < m; j += 32) {
@@ -594,7 +617,7 @@ namespace fastllm {
                 }
                 weightSum[i] += sum0[0] + sum0[1] + sum0[2] + sum0[3];
 #endif
-#ifdef __AVX__
+#ifdef __AVX2__
 	            __m256i acc = _mm256_setzero_si256();
 	            const __m256i lowMask = _mm256_set1_epi8(0xf);
 	            const __m256i ones = _mm256_set1_epi16(1);
@@ -795,6 +818,18 @@ namespace fastllm {
         q.push(SymbolPairs(now->score, l, r, symbols[l].len + symbols[r].len));
     }
 
+    int Tokenizer::GetRank(std::vector<Symbol> &symbols,  std::vector<std::pair<int, int>> &partitions, int idx, int skip) {
+        if (idx + skip + 2 >= partitions.size()) {
+            return std::numeric_limits<int>::max();
+        }
+        auto s = symbols[0].s + symbols[0].pos;
+        std::string key(s + partitions[idx].first, s + partitions[idx + skip + 2].first);
+        if (stringToTokenDict.find(key) != stringToTokenDict.end()) {
+            return stringToTokenDict[key];
+        }
+        return std::numeric_limits<int>::max();
+    }
+
     Data Tokenizer::Encode(const std::string &ori) {
         if (this->type == TokenizerType::BPE) {
             std::string blank = "";
@@ -901,6 +936,132 @@ namespace fastllm {
                 }
             }
             return Data (DataType::FLOAT32, {1, (int)v.size()}, v);
+        } else if (this->type == TokenizerType::GLM) {
+            const std::map<std::string, int> specialTokens = {{"[MASK]", 50003}, {"[sMASK]", 50008}, {"[gMASK]", 50009}};
+            std::string blank = "";
+            blank += 226, blank += 150, blank += 129;
+            std::string s = blank;
+            for (int i = 0; i < ori.size(); i++) {
+                if (ori[i] == ' ') {
+                    if (i != 0 && ori[i - 1] != ' ') {
+                        s += blank;
+                    }
+                } else {
+                    s += ori[i];
+                }
+            }
+            std::vector<float> v;
+            int findPos=0;
+            while(findPos<s.length()){
+                int nextSpecialToken=-1;
+                int nextSpecialTokenPos=-1;
+                int nextSpecialTokenLen=-1;
+                for(auto p:specialTokens){
+                    int ind=s.find(p.first,findPos);
+                    if(ind>=0&&(nextSpecialTokenPos<0||ind<nextSpecialTokenPos)){
+                        nextSpecialTokenPos=ind;
+                        nextSpecialToken=p.second;
+                        nextSpecialTokenLen=p.first.length();
+                    }
+                }
+                std::string subStr;
+                if(nextSpecialTokenPos<0){
+                    subStr=s.substr(findPos);
+                    findPos=s.length();
+                }else{
+                    subStr=s.substr(findPos,nextSpecialTokenPos-findPos);
+                    findPos=nextSpecialTokenPos+nextSpecialTokenLen;
+                }
+                if(subStr.length()>0){
+#ifdef USE_SENTENCEPIECE
+                    if(spProcessor!=nullptr){
+                        std::vector<int> ids;
+                        spProcessor->Encode(subStr,&ids);
+                        for(int id:ids){
+                            v.push_back(id);
+                        }
+                    }else{
+#endif
+                    std::vector<Symbol> symbols;
+                    for (int i = 0; i < subStr.size(); i++) {
+                        int tokenId = -999999, pos = i - 1;
+                        TrieNode *now = this->root;
+                        for (int j = i; j < subStr.size(); j++) {
+                            if (now->next.find(subStr[j]) != now->next.end()) {
+                                now = now->next[subStr[j]];
+                                if (now->tokenId != -999999) {
+                                    tokenId = now->tokenId;
+                                    pos = j;
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if (pos >= i) {
+                            symbols.push_back(Symbol(now, (char *) subStr.data(), i, pos - i + 1, (int) symbols.size() - 1,
+                                                     (int) symbols.size() + 1, -999999));
+                            i = pos;
+                        } else {
+                            symbols.push_back(Symbol(nullptr, (char *) subStr.data(), i, 0, (int) symbols.size() - 1,
+                                                     (int) symbols.size() + 1, -999999));
+                        }
+                    }
+                    symbols.back().next = -1;
+
+                    std::priority_queue<SymbolPairs> workQueue;
+                    for (int i = 1; i < symbols.size(); i++) {
+                        TryMergePairs(symbols, i - 1, i, workQueue);
+                    }
+
+                    while (!workQueue.empty()) {
+                        auto top = workQueue.top();
+                        workQueue.pop();
+                        if (symbols[top.l].len == 0 || symbols[top.r].len == 0 ||
+                                symbols[top.l].len + symbols[top.r].len != top.size) {
+                            continue;
+                        }
+
+                        for (int i = symbols[top.r].pos; i < symbols[top.r].pos + symbols[top.r].len; i++) {
+                            symbols[top.l].node = symbols[top.l].node->next[symbols[top.r].s[i]];
+                        }
+                        symbols[top.l].len += symbols[top.r].len;
+                        symbols[top.r].len = 0;
+                        symbols[top.l].next = symbols[top.r].next;
+                        if (symbols[top.r].next >= 0) {
+                            symbols[symbols[top.r].next].prev = top.l;
+                        }
+
+                        TryMergePairs(symbols, symbols[top.l].prev, top.l, workQueue);
+                        TryMergePairs(symbols, top.l, symbols[top.l].next, workQueue);
+                    }
+                    for (int i = 0; i < symbols.size(); i++) {
+                        if (symbols[i].len > 0) {
+                            v.push_back(symbols[i].node->tokenId);
+                        } else if (symbols[i].node == nullptr) {
+                            if (symbols[i].fixId != -999999) {
+                                v.push_back(symbols[i].fixId);
+                            } else {
+                                // 未识别的字符
+                                uint8_t c = (uint8_t) (symbols[i].s[symbols[i].pos]);
+                                std::string now = "<0x00>";
+                                now[3] = (c / 16 > 9 ? ('A' + c / 16 - 10) : ('0' + c / 16));
+                                now[4] = (c % 16 > 9 ? ('A' + c % 16 - 10) : ('0' + c % 16));
+                                if (stringToTokenDict.find(now) != stringToTokenDict.end()) {
+                                    v.push_back(stringToTokenDict[now]);
+                                }
+                            }
+                        }
+                    }
+#ifdef USE_SENTENCEPIECE
+                    }
+#endif
+                }
+                if(nextSpecialTokenPos>=0){
+                    v.push_back(nextSpecialToken);
+                }
+            }
+            return Data (DataType::FLOAT32, {1, (int)v.size()}, v);
         } else if (this->type == TokenizerType::QWEN) {
             std::map<std::string, int> specialTokens = {{"<|im_start|>", 151644}, {"<|im_end|>", 151645}, {"<|endoftext|>", 151643}};
 
@@ -926,48 +1087,38 @@ namespace fastllm {
                 if (i == sep.back().first) {
                     if (!symbols.empty()) {
                         symbols.back().next = -1;
-                        std::priority_queue<SymbolPairs> workQueue;
-                        for (int i = 1; i < symbols.size(); i++) {
-                            TryMergePairs(symbols, i - 1, i, workQueue);
+                        std::string cur = ori.substr(i - symbols.size(), symbols.size());
+                        std::vector<std::pair<int, int>> partitions(symbols.size() + 1);
+                        for (int j = 0; j <= (int) symbols.size(); j++) {
+                            partitions[j] = std::make_pair(j, std::numeric_limits<int>::max());
                         }
-
-                        while (!workQueue.empty()) {
-                            auto top = workQueue.top();
-                            workQueue.pop();
-                            if (symbols[top.l].len == 0 || symbols[top.r].len == 0 ||
-                                symbols[top.l].len + symbols[top.r].len != top.size) {
-                                continue;
-                            }
-
-                            for (int i = symbols[top.r].pos; i < symbols[top.r].pos + symbols[top.r].len; i++) {
-                                symbols[top.l].node = symbols[top.l].node->next[symbols[top.r].s[i]];
-                            }
-                            symbols[top.l].len += symbols[top.r].len;
-                            symbols[top.r].len = 0;
-                            symbols[top.l].next = symbols[top.r].next;
-                            if (symbols[top.r].next >= 0) {
-                                symbols[symbols[top.r].next].prev = top.l;
-                            }
-
-                            TryMergePairs(symbols, symbols[top.l].prev, top.l, workQueue);
-                            TryMergePairs(symbols, top.l, symbols[top.l].next, workQueue);
+                        for (int j = 0; j < partitions.size() - 2; j++) {
+                            partitions[j].second = GetRank(symbols, partitions, j, 0);
                         }
-
-                        for (int i = 0; i < symbols.size(); i++) {
-                            if (symbols[i].len > 0) {
-                                v.push_back(symbols[i].node->tokenId);
-                            } else if (symbols[i].node == nullptr) {
-                                // 未识别的字符
-                                uint8_t c = (uint8_t) (symbols[i].s[symbols[i].pos]);
-                                std::string now = "<0x00>";
-                                now[3] = (c / 16 > 9 ? ('A' + c / 16 - 10) : ('0' + c / 16));
-                                now[4] = (c % 16 > 9 ? ('A' + c % 16 - 10) : ('0' + c % 16));
-                                if (stringToTokenDict.find(now) != stringToTokenDict.end()) {
-                                    v.push_back(stringToTokenDict[now]);
+                        while (partitions.size() > 1) {
+                            int min_rank = std::numeric_limits<int>::max();
+                            int min_rank_idx = 0;
+                            for (int j = 0; j < partitions.size() - 1; ++j) {
+                                if (partitions[j].second < min_rank) {
+                                    min_rank = partitions[j].second;
+                                    min_rank_idx = j;
                                 }
+                            }
+                            if (min_rank != std::numeric_limits<int>::max()) {
+                                partitions[min_rank_idx].second = GetRank(symbols, partitions, min_rank_idx, 1);
+                                if (min_rank_idx > 0) {
+                                    partitions[min_rank_idx - 1].second = GetRank(symbols, partitions, min_rank_idx - 1, 1);
+                                }
+                                partitions.erase(partitions.begin() + min_rank_idx + 1);
+                            } else {
+                                break;
                             }
                         }
                         symbols.clear();
+                        for (int j = 0; j < partitions.size() - 1; j++) {
+                            std::string key = cur.substr(partitions[j].first, partitions[j + 1].first - partitions[j].first);
+                            v.push_back((float) stringToTokenDict[key]);
+                        }
                     }
 
                     std::string special = ori.substr(sep.back().first, sep.back().second);
@@ -1574,6 +1725,21 @@ namespace fastllm {
         }
     }
 
+    void WeightMap::ReleaseWeight() {
+        for (auto &w : this->weight) {
+#ifndef USE_MMAP
+            delete[] w.second.cpuData;
+            w.second.cpuData = nullptr;
+#endif
+#ifdef USE_CUDA
+            if (w.second.cudaData != nullptr) {
+                FastllmCudaDirectFree(w.second.cudaData);
+                w.second.cudaData = nullptr;
+            }
+#endif
+        }
+    }
+
     Data &WeightMap::operator[](const std::string &key) {
         return weight[key];
     }
@@ -1590,6 +1756,22 @@ namespace fastllm {
         } else {
             ErrorInFastLLM("ToDataDevice: Unsupport data type.\n");
         }
+    }
+
+    void CopyKVCache(Data &oldCache, Data &newCache, int oldBsStart, int newBsStart, int bs, int offset) {
+        curExecutor->Run("CopyKVCache", {
+                {"oldCache", (Data*)&oldCache}, {"newCache", (Data*)&newCache}
+        }, {}, {
+            {"oldBsStart", oldBsStart}, {"newBsStart", newBsStart}, {"bs", bs}, {"offset", offset}
+        });
+    }
+
+    void Attention(const Data &q, const Data &k, const Data &v, const Data &mask, Data &output,
+                   int group, float scale, int attentionType) {
+        curExecutor->Run("Attention", {
+                {"q", (Data*)&q}, {"k", (Data*)&k}, {"v", (Data*)&v},
+                {"mask", (Data*)&mask}, {"output", (Data*)&output}
+        }, {{"scale", scale}}, {{"group", group}});
     }
 
     void Embedding(const Data &input, Data &weight, Data &output) {
@@ -1804,6 +1986,21 @@ namespace fastllm {
         curExecutor->Run("CatDirectBatch", {
                 {"input0", (Data*)input0.data()}, {"input1", (Data*)input1.data()}
         }, {}, {{"axis", axis}, {"input0___batch", (int)input0.size()}, {"input1___batch", (int)input1.size()}});
+    }
+
+    void AttentionBatch(std::vector <Data*> &q, std::vector <Data*> &k, std::vector <Data*> &v,
+                        std::vector <Data*> &mask, std::vector <Data*> &output,
+                        int group, float scale, int attentionType) {
+        curExecutor->Run("AttentionBatch", {
+                {"q", (Data*)q.data()}, {"k", (Data*)k.data()}, {"v", (Data*)v.data()},
+                {"mask", (Data*)mask.data()}, {"output", (Data*)output.data()}
+        },
+        {{"scale", scale}},
+        {
+            {"group", group},
+            {"q___batch", (int)q.size()}, {"k___batch", (int)k.size()}, {"v___batch", (int)v.size()},
+            {"mask___batch", (int)mask.size()}, {"output___batch", (int)output.size()}
+        });
     }
 
     void LoraLayer(Data &input, Data &weight, Data &loraA, Data &loraB, const Data &bias, Data &output, 

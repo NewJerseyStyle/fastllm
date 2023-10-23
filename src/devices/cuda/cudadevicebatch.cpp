@@ -79,9 +79,12 @@ namespace fastllm {
 
         float v = floatParams.find("v") != floatParams.end() ? floatParams.find("v")->second : 1.0;
         int batch = intParams.find("input___batch")->second;
-        for (int i = 0; i < batch; i++) {
-            outputs[i]->Allocate();
-            AssertInFastLLM(inputs[i]->dataType == DataType::FLOAT32, "Mul error: Data's type should be float32.\n");
+        if (outputs[0]->Count(0) > outputs[0]->expansionSize) {
+            for (int i = 0; i < batch; i++) {
+                outputs[i]->Allocate();
+                AssertInFastLLM(inputs[i]->dataType == DataType::FLOAT32,
+                                "Mul error: Data's type should be float32.\n");
+            }
         }
 
         FastllmCudaMulBatch(inputs, v, batch, outputs);
@@ -89,16 +92,32 @@ namespace fastllm {
 
     void CudaMatMulBatchOp::Reshape(const std::string &opType, const fastllm::DataDict &datas,
                                          const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
-        fastllm::BaseOperator *op = (fastllm::BaseOperator*)(new CudaMatMulOp());
         int batch = intParams.find("input0___batch")->second;
-        DataDict tempDatas = datas;
-        for (int i = 0; i < batch; i++) {
-            tempDatas["input0"] = ((Data**)datas.find("input0")->second)[i];
-            tempDatas["input1"] = ((Data**)datas.find("input1")->second)[i];
-            tempDatas["output"] = ((Data**)datas.find("output")->second)[i];
-            op->Reshape("MatMulTransB", tempDatas, floatParams, intParams);
+        Data** input0s = ((Data**)datas.find("input0")->second);
+        Data** input1s = ((Data**)datas.find("input1")->second);
+        Data** outputs = ((Data**)datas.find("output")->second);
+
+        if (input0s[0]->dims.size() == 3 && input1s[0]->dims.size() == 3) {
+            AssertInFastLLM(input0s[0]->dataType == DataType::FLOAT32 && input1s[0]->dataType == DataType::FLOAT32,
+                            "MatMul's input's type should be float32.\n");
+            AssertInFastLLM(input0s[0]->dims[0] == input1s[0]->dims[0] &&
+                            input0s[0]->dims[2] == input1s[0]->dims[1],
+                            "MatMul's shape error.\n");
+            for (int i = 0; i < batch; i++) {
+                outputs[i]->dataType = input0s[i]->dataType;
+                outputs[i]->Resize({input0s[i]->dims[0], input0s[i]->dims[1], input1s[i]->dims[2]});
+            }
+        } else {
+            fastllm::BaseOperator *op = (fastllm::BaseOperator*)(new CudaMatMulOp());
+            DataDict tempDatas = datas;
+            for (int i = 0; i < batch; i++) {
+                tempDatas["input0"] = ((Data **) datas.find("input0")->second)[i];
+                tempDatas["input1"] = ((Data **) datas.find("input1")->second)[i];
+                tempDatas["output"] = ((Data **) datas.find("output")->second)[i];
+                op->Reshape("MatMulTransB", tempDatas, floatParams, intParams);
+            }
+            delete op;
         }
-        delete op;
     }
 
     void CudaMatMulBatchOp::Run(const std::string &opType, const fastllm::DataDict &datas,
@@ -147,16 +166,32 @@ namespace fastllm {
 
     void CudaMatMulTransBBatchOp::Reshape(const std::string &opType, const fastllm::DataDict &datas,
                                           const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
-        fastllm::BaseOperator *op = (fastllm::BaseOperator*)(new CudaMatMulTransBOp());
         int batch = intParams.find("input0___batch")->second;
-        DataDict tempDatas = datas;
-        for (int i = 0; i < batch; i++) {
-            tempDatas["input0"] = ((Data**)datas.find("input0")->second)[i];
-            tempDatas["input1"] = ((Data**)datas.find("input1")->second)[i];
-            tempDatas["output"] = ((Data**)datas.find("output")->second)[i];
-            op->Reshape("MatMulTransB", tempDatas, floatParams, intParams);
+        Data **input0s = ((Data **) datas.find("input0")->second);
+        Data **input1s = ((Data **) datas.find("input1")->second);
+        Data **outputs = ((Data **) datas.find("output")->second);
+
+        if (input0s[0]->dims.size() == 3 && input1s[0]->dims.size() == 3) {
+            AssertInFastLLM(input0s[0]->dataType == DataType::FLOAT32 && input1s[0]->dataType == DataType::FLOAT32,
+                            "MatMul's input's type should be float32.\n");
+            AssertInFastLLM(input0s[0]->dims[0] == input1s[0]->dims[0] &&
+                            input0s[0]->dims[2] == input1s[0]->dims[2],
+                            "MatMul's shape error.\n");
+            for (int i = 0; i < batch; i++) {
+                outputs[i]->dataType = input0s[i]->dataType;
+                outputs[i]->Resize({input0s[i]->dims[0], input0s[i]->dims[1], input1s[i]->dims[1]});
+            }
+        } else {
+            fastllm::BaseOperator *op = (fastllm::BaseOperator *) (new CudaMatMulTransBOp());
+            DataDict tempDatas = datas;
+            for (int i = 0; i < batch; i++) {
+                tempDatas["input0"] = ((Data **) datas.find("input0")->second)[i];
+                tempDatas["input1"] = ((Data **) datas.find("input1")->second)[i];
+                tempDatas["output"] = ((Data **) datas.find("output")->second)[i];
+                op->Reshape("MatMulTransB", tempDatas, floatParams, intParams);
+            }
+            delete op;
         }
-        delete op;
     }
 
     void CudaMatMulTransBBatchOp::Run(const std::string &opType, const fastllm::DataDict &datas,
@@ -282,5 +317,47 @@ namespace fastllm {
 
         FastllmCudaMemcpy2DDeviceToDeviceBatch(dsts.data(), dpitchs.data(), srcs.data(),
                                                spitchs.data(), widths.data(), heights.data(), dsts.size());
+    }
+
+    void CudaAttentionBatchOp::Reshape(const std::string &opType, const fastllm::DataDict &datas,
+                                      const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        Data **qs = (Data**)(datas.find("q")->second);
+        Data **ks = (Data**)(datas.find("k")->second);
+        Data **vs = (Data**)(datas.find("v")->second);
+        Data **outputs = (Data**)(datas.find("output")->second);
+        int group = intParams.find("group") != intParams.end() ? intParams.find("group")->second : 1;
+        int batch = intParams.find("q___batch")->second;
+
+        Data &q = *qs[0], &k = *ks[0], &v = *vs[0];
+        AssertInFastLLM(q.dims.size() == 3 && k.dims.size() == 3 && v.dims.size() == 3, "Attention: dims of q, k, v should be 3.\n");
+        AssertInFastLLM(q.dims[2] == k.dims[2], "Attention: q.dims[2] should be equal to k.dims[2].\n");
+        AssertInFastLLM(k.dims[1] == v.dims[1], "Attention: k.dims[1] should be equal to v.dims[1].\n");
+        AssertInFastLLM(k.dims[0] == v.dims[0], "Attention: k.dims[0] should be equal to v.dims[0].\n");
+        AssertInFastLLM(q.dims[0] == k.dims[0] * group, "Attention: q.dims[0] should be equal to k.dims[0] * group.\n");
+        AssertInFastLLM(q.dataType == k.dataType && q.dataType == v.dataType,
+                        "Attention: q, k, v's datatype should be same.\n");
+        AssertInFastLLM(q.dataType == DataType::FLOAT32, "Attention's input's type should be float32.\n");
+
+        for (int i = 0; i < batch; i++) {
+            outputs[i]->dataType = qs[i]->dataType;
+            outputs[i]->Resize({qs[i]->dims[0], qs[i]->dims[1], vs[i]->dims[2]});
+        }
+    }
+
+    void CudaAttentionBatchOp::Run(const std::string &opType, const fastllm::DataDict &datas,
+                                  const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        int batch = intParams.find("q___batch")->second;
+        Data **qs = (Data**)(datas.find("q")->second);
+        Data **ks = (Data**)(datas.find("k")->second);
+        Data **vs = (Data**)(datas.find("v")->second);
+        Data **masks = (Data**)(datas.find("mask")->second);
+        Data **outputs = (Data**)(datas.find("output")->second);
+        for (int i = 0; i < batch; i++) {
+            outputs[i]->Allocate();
+        }
+        FastllmCudaAttentionBatch(qs, ks, vs, masks, outputs,
+                                  intParams.find("group")->second,
+                                  floatParams.find("scale")->second,
+                                  intParams.find("q___batch")->second);
     }
 }

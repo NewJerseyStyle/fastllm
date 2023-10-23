@@ -22,6 +22,8 @@ namespace fastllm {
         this->deviceType = "cpu";
         this->ops["ToFloat16"] = (BaseOperator*)(new CpuToFloat16());
         this->ops["ToFloat32"] = (BaseOperator*)(new CpuToFloat32());
+        this->ops["Attention"] = (BaseOperator*)(new CpuAttention());
+        this->ops["CopyKVCache"] = (BaseOperator*)(new CpuCopyKVCacheOp());
         this->ops["Embedding"] = (BaseOperator*)(new CpuEmbedding());
         this->ops["LayerNorm"] = (BaseOperator*)(new CpuLayerNormOp());
         this->ops["RMSNorm"] = (BaseOperator*)(new CpuRMSNormOp());
@@ -56,6 +58,7 @@ namespace fastllm {
         this->ops["MatMulTransBBatch"] = (BaseOperator*)(new CpuMatMulTransBBatchOp());
         this->ops["SoftMaxBatch"] = (BaseOperator*)(new CpuSoftmaxBatchOp());
         this->ops["CatDirectBatch"] = (BaseOperator*)(new CpuCatDirectBatchOp());
+        this->ops["AttentionBatch"] = (BaseOperator*)(new CpuAttentionBatchOp());
     }
 
     bool CpuDevice::Malloc(void **ret, size_t size) {
@@ -76,7 +79,7 @@ namespace fastllm {
         return true;
     }
 
-#ifdef __AVX__
+
 #ifdef __AVX2__
     int DotU8U8(uint8_t *a, uint8_t *b, int n) {
         __m256i acc = _mm256_setzero_si256();
@@ -104,32 +107,31 @@ namespace fastllm {
 
         return ans + I32sum(acc);
     };
-#else
-    int DotU8U8(uint8_t *a, uint8_t *b, int n) {
-        __m256i acc = _mm256_setzero_si256();
+//#else
+//    int DotU8U8(uint8_t *a, uint8_t *b, int n) {
+//        __m256i acc = _mm256_setzero_si256();
 
-        int i = 0;
-        int ans = 0;
-        for (; i + 31 < n; i += 32) {
-            __m256i bx = _mm256_loadu_si256((const __m256i *) (a + i));
-            __m256i by = _mm256_loadu_si256((const __m256i *) (b + i));
+//        int i = 0;
+//        int ans = 0;
+//        for (; i + 31 < n; i += 32) {
+//            __m256i bx = _mm256_loadu_si256((const __m256i *) (a + i));
+//            __m256i by = _mm256_loadu_si256((const __m256i *) (b + i));
 
-            __m256i mx0 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(bx, 0));
-            __m256i mx1 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(bx, 1));
+//            __m256i mx0 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(bx, 0));
+//            __m256i mx1 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(bx, 1));
 
-            __m256i my0 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(by, 0));
-            __m256i my1 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(by, 1));
+//            __m256i my0 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(by, 0));
+//            __m256i my1 = _mm256_cvtepu8_epi16(_mm256_extractf128_si256(by, 1));
 
-            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(mx0, my0));
-            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(mx1, my1));
-        }
-        for (; i < n; i++) {
-            ans += a[i] * b[i];
-        }
+//            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(mx0, my0));
+//            //acc = _mm256_add_epi32(acc, _mm256_madd_epi16(mx1, my1));
+//        }
+//        for (; i < n; i++) {
+//            ans += a[i] * b[i];
+//        }
 
-        return ans + I32sum(acc);
-    };
-#endif
+//        return ans + I32sum(acc);
+//    };
     int DotU4U8(uint8_t *a, uint8_t *b, int n) {
         __m256i acc = _mm256_setzero_si256();
 
@@ -202,6 +204,121 @@ namespace fastllm {
             delete[] old;
         } else {
             ErrorInFastLLM("ToFloat32: unsupport dataType.\n");
+        }
+    }
+
+    void CpuAttention::Reshape(const std::string &opType, const fastllm::DataDict &datas,
+                               const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        Data &q = *(datas.find("q")->second);
+        Data &k = *(datas.find("k")->second);
+        Data &v = *(datas.find("v")->second);
+        Data &output = *(datas.find("output")->second);
+        int group = intParams.find("group") != intParams.end() ? intParams.find("group")->second : 1;
+
+        AssertInFastLLM(q.dims.size() == 3 && k.dims.size() == 3 && v.dims.size() == 3, "Attention: dims of q, k, v should be 3.\n");
+        AssertInFastLLM(q.dims[2] == k.dims[2], "Attention: q.dims[2] should be equal to k.dims[2].\n");
+        AssertInFastLLM(k.dims[1] == v.dims[1], "Attention: k.dims[1] should be equal to v.dims[1].\n");
+        AssertInFastLLM(k.dims[0] == v.dims[0], "Attention: k.dims[0] should be equal to v.dims[0].\n");
+        AssertInFastLLM(q.dims[0] == k.dims[0] * group, "Attention: q.dims[0] should be equal to k.dims[0] * group.\n");
+
+        AssertInFastLLM(q.dataType == k.dataType && q.dataType == v.dataType,
+                        "Attention: q, k, v's datatype should be same.\n");
+        AssertInFastLLM(q.dataType == DataType::FLOAT32, "Attention's input's type should be float32.\n");
+
+        std::vector <int> dims = {q.dims[0], q.dims[1], v.dims[2]};
+        output.dataType = q.dataType;
+        output.Resize(dims);
+    }
+
+    void SingleAttention(float *qd, float *kd, float *vd, float *maskd, float *od,
+                         float scale, int q1, int q2, int k1, int v2) {
+        float *qk = new float[k1];
+        float *temp = new float[k1];
+        for (int i = 0; i < q1; i++) {
+            float maxValue = -10000, sum = 0.0;
+            for (int j = 0; j < k1; j++) {
+                if (maskd && maskd[i * k1 + j] > 0.99) {
+                    qk[j] = -10000;
+                    continue;
+                }
+                float sum = 0.0f;
+                for (int l = 0; l < q2; l++) {
+                    sum += qd[i * q2 + l] * kd[j * q2 + l];
+                }
+                qk[j] = sum * scale;
+                maxValue = std::max(maxValue, sum * scale);
+            }
+            for (int j = 0; j < k1; j++) {
+                temp[j] = expf(qk[j] - maxValue);
+                sum += temp[j];
+            }
+            sum = std::max(sum, 0.1f);
+            for (int j = 0; j < k1; j++) {
+                qk[j] = temp[j] / sum;
+            }
+            for (int j = 0; j < k1; j++) {
+                for (int l = 0; l < v2; l++) {
+                    od[i * v2 + l] += qk[j] * vd[j * v2 + l];
+                }
+            }
+        }
+        delete[] qk;
+        delete[] temp;
+    }
+
+    void CpuAttention::Run(const std::string &opType, const fastllm::DataDict &datas,
+                           const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        Data &q = *(datas.find("q")->second);
+        Data &k = *(datas.find("k")->second);
+        Data &v = *(datas.find("v")->second);
+        Data &mask = *(datas.find("mask")->second);
+        Data &output = *(datas.find("output")->second);
+        int group = intParams.find("group") != intParams.end() ? intParams.find("group")->second : 1;
+        float scale = floatParams.find("scale") != floatParams.end() ? floatParams.find("scale")->second : 1.0;
+        output.Allocate();
+        int q0 = q.dims[0], q1 = q.dims[1], q2 = q.dims[2], k0 = k.dims[0], k1 = k.dims[1], v2 = v.dims[2];
+        float *qd = (float*)q.cpuData;
+        float *kd = (float*)k.cpuData;
+        float *vd = (float*)v.cpuData;
+        float *maskd = (datas.find("mask")->second && mask.dims.size() > 0) ? (float*)mask.cpuData : nullptr;
+        float *od = (float*)output.cpuData;
+        int batch = (mask.dims.size() == 3 ? mask.dims[0] : 1);
+        int maskStride = (mask.dims.size() == 3 ? mask.strides[0] : mask.Count(0));
+        std::fill(od, od + output.Count(0), 0.0f);
+        auto pool = GetPool();
+        std::vector<std::future<void> > futures;
+        for (int o = 0; o < q0; o++) {
+            futures.push_back(pool->Submit(SingleAttention,
+                            qd + o * q.strides[0], kd + (o / group) * k.strides[0], vd + (o / group) * v.strides[0],
+                            maskd + (o / (q0 / batch)) * maskStride, od + o * output.strides[0], scale,
+                            q1, q2, k1, v2));
+        }
+        for (int o = 0; o < futures.size(); o++) {
+            futures[o].get();
+        }
+    }
+
+    void CpuCopyKVCacheOp::Reshape(const std::string &opType, const fastllm::DataDict &datas,
+                                   const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        return;
+    }
+
+    void CpuCopyKVCacheOp::Run(const std::string &opType, const fastllm::DataDict &datas,
+                               const fastllm::FloatDict &floatParams, const fastllm::IntDict &intParams) {
+        Data &oldCache = *(datas.find("oldCache")->second);
+        Data &newCache = *(datas.find("newCache")->second);
+
+        int oldBsStart = intParams.find("oldBsStart") != intParams.end() ? intParams.find("oldBsStart")->second : -1;
+        int newBsStart = intParams.find("newBsStart") != intParams.end() ? intParams.find("newBsStart")->second : -1;
+        int bs = intParams.find("bs") != intParams.end() ? intParams.find("bs")->second : -1;
+        int offset = intParams.find("offset") != intParams.end() ? intParams.find("offset")->second : -1;
+
+        int unitSize = oldCache.unitSize;
+        for (int o = 0; o < bs; o++) {
+            uint8_t *cur = newCache.cpuData + (newBsStart + o) * newCache.strides[0] * unitSize;
+            cur += offset * newCache.strides[1] * unitSize;
+            uint8_t *old = oldCache.cpuData + (oldBsStart + o) * oldCache.strides[0] * unitSize;
+            memcpy(cur, old, oldCache.dims[1] * oldCache.dims[2] * unitSize);
         }
     }
 
@@ -803,7 +920,7 @@ namespace fastllm {
                 c[block * kstride + i] = value;
             }
         }
-#elif defined(__AVX__)
+#elif defined(__AVX2__)
         int block = 0;
         for (; block < n; block++) {
             uint8_t *weightWalk = b;
@@ -877,7 +994,7 @@ namespace fastllm {
                     sum0 = vpadalq_u16(sum0, vmull_u8(vb, in.val[0]));
                 }
                 value += sum0[0] + sum0[1] + sum0[2] + sum0[3];
-#elif defined(__AVX__)
+#elif defined(__AVX2__)
                 value += DotU4U8(weightWalk + i * m / 2, inputWalk, m);
                 j += m;
 #endif
@@ -948,7 +1065,7 @@ namespace fastllm {
                     sum0 = vpadalq_u16(sum0, vmull_u8(vb, in.val[0]));
                 }
                 value += sum0[0] + sum0[1] + sum0[2] + sum0[3];
-#elif defined(__AVX__)
+#elif defined(__AVX2__)
                 value += DotU4U8(weightWalk + i * m / 2, inputWalk, m);
                 j += m;
 #endif
