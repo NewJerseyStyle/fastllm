@@ -8,7 +8,7 @@
 #include <vector>
 #include <chrono>
 
-#include "fastllm-cuda.h"
+#include "fastllm-cuda.cuh"
 #include "fastllm.h"
 
 static std::map<int, hipblasHandle_t> s_fastllmCublasHandleMap;
@@ -146,6 +146,16 @@ __global__ void FastllmAttentionMaskKernel(float* a, float *b, float maskValue, 
     for (int i = idx; i < spatial; i += THREAD_PER_BLOCK) {
         if (b[on * spatial + i] > 0.99) {
             a[o * spatial + i] = maskValue;
+        }
+    }
+}
+
+template <int THREAD_PER_BLOCK>
+__global__ void SimpleMask(float* a, float *b, float maskValue, int spatial) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < spatial) {
+        if (b[i] > 0.99) {
+            a[i] = maskValue;
         }
     }
 }
@@ -792,6 +802,63 @@ __global__ void FastllmMatMulTransBBatchKernel(uint8_t** pointer, float alpha) {
     int input1Stride = (int)((size_t)pointer[id * 8 + 7]);
 
     int tid = threadIdx.x;
+    int pera = 4, perb = 4;
+    float cura[4][4], curb[4][4], curc[4][4];
+    int cnta = (n - 1) / pera + 1, cntb = (k - 1) / perb + 1;
+    for (int taskId = tid; taskId < cnta * cntb; taskId += THREAD_PER_BLOCK) {
+        int taska = taskId / cntb, taskb = taskId % cntb;
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                cura[i][j] = 0;
+                curb[i][j] = 0;
+                curc[i][j] = 0;
+            }
+        }
+
+        for (int l = 0; l < m; l += 4) {
+            for (int a = taska * pera; a < (taska + 1) * pera && a < n; a++) {
+#pragma unroll
+                for (int x = 0; x < 4; x++) {
+                    cura[a - taska * pera][x] = input0[a * input0Stride + l + x];
+                }
+            }
+            for (int b = taskb * perb; b < (taskb + 1) * perb && b < k; b++) {
+#pragma unroll
+                for (int x = 0; x < 4; x++) {
+                    curb[b - taskb * perb][x] = input1[b * input1Stride + l + x];
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+#pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        curc[i][j] += cura[i][k] * curb[j][k];
+                    }
+                }
+            }
+        }
+
+        if ((taska + 1) * pera <= n && (taskb + 1) * perb <= k) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    output[(taska * pera + i) * k + (taskb * perb + j)] = curc[i][j] * alpha;
+                }
+            }
+        } else {
+            for (int i = 0; i < pera && taska * pera + i < n; i++) {
+                for (int j = 0; j < perb && taskb * perb + j < k; j++) {
+                    output[(taska * pera + i) * k + (taskb * perb + j)] = curc[i][j] * alpha;
+                }
+            }
+        }
+    }
+
+/*
+    int tid = threadIdx.x;
     for (int i = 0; i < n; i++) {
         float *curInput0 = input0 + i * input0Stride;
         for (int j = tid; j < k; j += THREAD_PER_BLOCK) {
@@ -803,6 +870,7 @@ __global__ void FastllmMatMulTransBBatchKernel(uint8_t** pointer, float alpha) {
             output[i * k + j] = sum * alpha;
         }
     }
+*/
 }
 
 template <int THREAD_PER_BLOCK>
@@ -818,6 +886,64 @@ __global__ void FastllmMatMulKernel(uint8_t** pointer, float alpha) {
     int input1Stride = (int)((size_t)pointer[id * 8 + 7]);
 
     int tid = threadIdx.x;
+    int pera = 4, perb = 4;
+    float cura[4][4], curb[4][4], curc[4][4];
+    int cnta = (n - 1) / pera + 1, cntb = (k - 1) / perb + 1;
+    for (int taskId = tid; taskId < cnta * cntb; taskId += THREAD_PER_BLOCK) {
+        int taska = taskId / cntb, taskb = taskId % cntb;
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                cura[i][j] = 0;
+                curb[i][j] = 0;
+                curc[i][j] = 0;
+            }
+        }
+
+        for (int l = 0; l < m; l += 4) {
+            for (int a = taska * pera; a < (taska + 1) * pera && a < n; a++) {
+#pragma unroll
+                for (int x = 0; x < 4; x++) {
+                    cura[a - taska * pera][x] = l + x < m ? input0[a * input0Stride + l + x] : 0;
+                }
+            }
+            for (int b = taskb * perb; b < (taskb + 1) * perb && b < k; b++) {
+#pragma unroll
+                for (int x = 0; x < 4; x++) {
+                    curb[b - taskb * perb][x] = l + x < m ? input1[(l + x) * input1Stride + b] : 0;
+                }
+            }
+
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+#pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        curc[i][j] += cura[i][k] * curb[j][k];
+                    }
+                }
+            }
+        }
+
+        if ((taska + 1) * pera <= n && (taskb + 1) * perb <= k) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    output[(taska * pera + i) * k + (taskb * perb + j)] = curc[i][j] * alpha;
+                }
+            }
+        } else {
+            for (int i = 0; i < pera && taska * pera + i < n; i++) {
+                for (int j = 0; j < perb && taskb * perb + j < k; j++) {
+                    output[(taska * pera + i) * k + (taskb * perb + j)] = curc[i][j] * alpha;
+                }
+            }
+        }
+    }
+
+/*
+    //int tid = threadIdx.x;
     for (int i = 0; i < n; i++) {
         float *curInput0 = input0 + i * input0Stride;
         for (int j = tid; j < k; j += THREAD_PER_BLOCK) {
@@ -828,6 +954,112 @@ __global__ void FastllmMatMulKernel(uint8_t** pointer, float alpha) {
             }
             output[i * k + j] = sum * alpha;
         }
+    }
+*/
+}
+
+template <int THREAD_PER_BLOCK>
+__global__ void FastllmAttentionKernel(float *qd, float *kd, float *vd, float *maskd, float *od,
+                                       float scale, int q1, int q2, int k1, int v2,
+                                       int group, int qstride, int kstride, int vstride, int ostride,
+                                       float *qk, float *temp) {
+    int o = blockIdx.x;
+    qd += o * qstride;
+    kd += (o / group) * kstride;
+    vd += (o / group) * vstride;
+    od += o * ostride;
+    qk += o * k1;
+    temp += o * k1;
+    for (int i = 0; i < q1; i++) {
+        for (int j = threadIdx.x; j < k1; j += THREAD_PER_BLOCK) {
+            if (maskd && maskd[i * k1 + j] > 0.99) {
+                qk[j] = -10000;
+                continue;
+            }
+            float sum = 0.0f;
+            float *tempQd = qd + i * q2, *tempKd = kd + j * q2;
+            for (int l = 0; l < q2; l++) {
+                sum += tempQd[l] * tempKd[l];
+            }
+            qk[j] = sum * scale;
+        }
+        __syncthreads();
+        FastllmSoftmaxKernelInner1Func <THREAD_PER_BLOCK> (qk, temp, k1);
+        __syncthreads();
+        for (int j = threadIdx.x; j < v2; j += THREAD_PER_BLOCK) {
+            float *curInput1 = vd + j;
+            float sum = 0.0;
+            for (int l = 0; l < k1; l++) {
+                sum += temp[l] * curInput1[l * v2];
+            }
+            od[i * v2 + j] = sum;
+        }
+        __syncthreads();
+    }
+}
+
+template <int THREAD_PER_BLOCK>
+__global__ void FastllmAttentionBatchKernel(float** pointer, float scale, int group) {
+    const int params = 16;
+    int id = blockIdx.x;
+    float *qd = (float*) pointer[id * params + 0];
+    float *kd = (float*) pointer[id * params + 1];
+    float *vd = (float*) pointer[id * params + 2];
+    float *maskd = (float*) pointer[id * params + 3];
+    float *od = (float*) pointer[id * params + 4];
+    int q1 = (int)(unsigned long long)pointer[id * params + 5];
+    int q2 = (int)(unsigned long long)pointer[id * params + 6];
+    int k1 = (int)(unsigned long long)pointer[id * params + 7];
+    int v2 = (int)(unsigned long long)pointer[id * params + 8];
+    int qstride = (int)(unsigned long long)pointer[id * params + 9];
+    int kstride = (int)(unsigned long long)pointer[id * params + 10];
+    int vstride = (int)(unsigned long long)pointer[id * params + 11];
+    int ostride = (int)(unsigned long long)pointer[id * params + 12];
+    float *qk = (float*)pointer[id * params + 13];
+    float *temp = (float*)pointer[id * params + 14];
+    int q0 = (int)(unsigned long long)pointer[id * params + 15];
+
+    for (int o = 0; o < q0; o++) {
+        qd += o * qstride;
+        kd += (o / group) * kstride;
+        vd += (o / group) * vstride;
+        od += o * ostride;
+        qk += o * k1;
+        temp += o * k1;
+
+        for (int i = 0; i < q1; i++) {
+            for (int j = threadIdx.x; j < k1; j += THREAD_PER_BLOCK) {
+                if (maskd && maskd[i * k1 + j] > 0.99) {
+                    qk[j] = -10000;
+                    continue;
+                }
+                float sum = 0.0f;
+                float *tempQd = qd + i * q2, *tempKd = kd + j * q2;
+                for (int l = 0; l < q2; l++) {
+                    sum += tempQd[l] * tempKd[l];
+                }
+                qk[j] = sum * scale;
+            }
+            __syncthreads();
+            FastllmSoftmaxKernelInner1Func<THREAD_PER_BLOCK>(qk, temp, k1);
+            __syncthreads();
+            for (int j = threadIdx.x; j < v2; j += THREAD_PER_BLOCK) {
+                float *curInput1 = vd + j;
+                float sum = 0.0;
+                for (int l = 0; l < k1; l++) {
+                    sum += temp[l] * curInput1[l * v2];
+                }
+                od[i * v2 + j] = sum;
+            }
+            __syncthreads();
+        }
+
+        qd -= o * qstride;
+        kd -= (o / group) * kstride;
+        vd -= (o / group) * vstride;
+        od -= o * ostride;
+        qk -= o * k1;
+        temp -= o * k1;
     }
 }
 
@@ -1223,7 +1455,18 @@ struct CudaMemoryBuffer {
             data(data), size(size), busy(busy) {}
 };
 std::map<int, std::vector <CudaMemoryBuffer>> cudaBuffersMap;
+std::map<int, size_t> noBusyCnt;
 std::map<int, std::vector <CudaMemoryBuffer>> bigBuffersMap;
+
+void * FastllmCudaDirectMalloc(size_t size) {
+    void * ret;
+    hipMalloc(&ret, size);
+    return ret;
+}
+
+void FastllmCudaDirectFree(void *ret) {
+    hipFree(ret);
+}
 
 void * FastllmCudaMalloc(size_t size) {
     int id = -1;
@@ -1233,7 +1476,7 @@ void * FastllmCudaMalloc(size_t size) {
         int selId = -1;
         for (int i = 0; i < bigBuffers.size(); i++) {
             if (bigBuffers[i].size >= size && !bigBuffers[i].busy
-                && bigBuffers[i].size - size < 32 * 1024 * 1024) {
+                && bigBuffers[i].size - size < 1 * 1024 * 1024) {
                 if (selId == -1 || bigBuffers[selId].size > bigBuffers[i].size) {
                     selId = i;
                 }
@@ -1253,6 +1496,7 @@ void * FastllmCudaMalloc(size_t size) {
     for (int i = 0; i < cudaBuffers.size(); i++) {
         if (cudaBuffers[i].size >= size && !cudaBuffers[i].busy) {
             cudaBuffers[i].busy = true;
+            noBusyCnt[id] -= cudaBuffers[i].size;
             return cudaBuffers[i].data;
         }
     }
@@ -1266,10 +1510,29 @@ void FastllmCudaFree(void *ret) {
     if (ret == nullptr) {
         return;
     }
-    for (auto &it : cudaBuffersMap) {
+    for (auto &it: cudaBuffersMap) {
+        if (noBusyCnt[it.first] > 1024 * 1024 * 1024) {
+            auto &cudaBuffers = it.second;
+            std::vector <CudaMemoryBuffer> temp;
+            for (int i = 0; i < cudaBuffers.size(); i++) {
+                if (!cudaBuffers[i].busy) {
+                    hipSetDevice(it.first);
+                    hipFree(cudaBuffers[i].data);
+                } else {
+                    temp.push_back(cudaBuffers[i]);
+                }
+            }
+            cudaBuffers.clear();
+            it.second = temp;
+            noBusyCnt[it.first] = 0;
+        }
+    }
+
+    for (auto &it: cudaBuffersMap) {
         auto &cudaBuffers = it.second;
         for (int i = 0; i < cudaBuffers.size(); i++) {
             if (cudaBuffers[i].data == ret) {
+                noBusyCnt[it.first] += cudaBuffers[i].size;
                 cudaBuffers[i].busy = false;
                 return;
             }
@@ -1676,6 +1939,143 @@ bool FastllmCudaPermute(fastllm::Data &input, const std::vector<int> &axis) {
     return true;
 }
 
+bool FastllmCudaAttention(const fastllm::Data &q, const fastllm::Data &k, const fastllm::Data &v,
+                          const fastllm::Data &mask, const fastllm::Data &output, int group, float scale) {
+    int q0 = q.dims[0], q1 = q.dims[1], q2 = q.dims[2], k0 = k.dims[0], k1 = k.dims[1], v2 = v.dims[2];
+    float *qd = (float*)q.cudaData;
+    float *kd = (float*)k.cudaData;
+    float *vd = (float*)v.cudaData;
+    float *maskd = mask.dims.size() > 0 ? (float*)mask.cudaData : nullptr;
+    float *od = (float*)output.cudaData;
+    int batch = (mask.dims.size() == 3) ? mask.dims[0] : 1;
+    int maskStride = (mask.dims.size() == 3 ? mask.strides[0] : mask.Count(0));
+    if (false) {
+        float *qk = (float *) FastllmCudaMalloc(q0 * k1 * sizeof(float));
+        float *temp = (float *) FastllmCudaMalloc(q0 * k1 * sizeof(float));
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmAttentionKernel<256>), dim3(q0), dim3(256), 0, 0, qd, kd, vd, maskd, od,
+                                                  scale, q1, q2, k1, v2,
+                                                  group, q.strides[0], k.strides[0], v.strides[0], output.strides[0],
+                                                  qk, temp);
+        FastllmCudaFree(qk);
+        FastllmCudaFree(temp);
+        return true;
+    }
+
+    if (q1 > 1024) {
+        float *qk = (float *) FastllmCudaMalloc(q1 * k1 * sizeof(float));
+        float beta = 0, one = 1;
+        auto fastllmCublasHandle = getFastllmCublasHandle();
+        hipblasStatus_t status;
+
+
+        for (int i = 0; i < q0; i++) {
+            status = hipblasSgemmStridedBatched(fastllmCublasHandle,
+                                               HIPBLAS_OP_T, HIPBLAS_OP_N,
+                                               k1, q1, q2, &scale,
+                                               kd + (i / group) * k.Count(1), k.strides[1], k.Count(1),
+                                               qd + i * q.Count(1), q.strides[1], q.Count(1),
+                                               &beta,
+                                               qk, k1, k1 * q1, 1);
+            if (status != HIPBLAS_STATUS_SUCCESS) {
+                printf("status = %d\n", (int) status);
+                printf("Error: cublas error.\n");
+                throw ("cublas error");
+                exit(0);
+            }
+
+            if (maskd) {
+                hipLaunchKernelGGL(HIP_KERNEL_NAME(SimpleMask<256>), dim3((q1 * k1 / 256) + 1), dim3(256), 0, 0, qk, maskd + (i / (q0 / batch)) * maskStride, -10000, q1 * k1);
+            }
+
+            int outer = q1;
+            if (k1 < 8) {
+                hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<1>), dim3(outer), dim3(1 ), 0, 0, qk, qk, outer, k1);
+            } else if (k1 < 64) {
+                hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<8>), dim3(outer), dim3(8 ), 0, 0, qk, qk, outer, k1);
+            } else if (k1 < 512) {
+                hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<64>), dim3(outer), dim3(64 ), 0, 0, qk, qk, outer, k1);
+            } else {
+                hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<256>), dim3(outer), dim3(256 ), 0, 0, qk, qk, outer, k1);
+            }
+
+            status = hipblasSgemmStridedBatched(fastllmCublasHandle,
+                                               HIPBLAS_OP_N, HIPBLAS_OP_N,
+                                               v2, q1, k1, &one,
+                                               vd + (i / group) * v.Count(1), v.strides[1], v.Count(1),
+                                               qk, k1, k1 * q1,
+                                               &beta,
+                                               od + i * v2 * q1, v2, v2 * q1, 1);
+            if (status != HIPBLAS_STATUS_SUCCESS) {
+                printf("status = %d\n", (int) status);
+                printf("Error: cublas error.\n");
+                throw ("cublas error");
+                exit(0);
+            }
+        }
+
+        FastllmCudaFree(qk);
+        DeviceSync();
+        return true;
+    }
+
+    if (true) {
+        float *qk = (float *) FastllmCudaMalloc(q0 * q1 * k1 * sizeof(float));
+        float *temp = (float *) FastllmCudaMalloc(q0 * q1 * k1 * sizeof(float));
+        float beta = 0, one = 1;
+        auto fastllmCublasHandle = getFastllmCublasHandle();
+        hipblasStatus_t status;
+
+        status = hipblasSgemmStridedBatched(fastllmCublasHandle,
+                                           HIPBLAS_OP_T, HIPBLAS_OP_N,
+                                           k1, q1 * group, q2, &scale,
+                                           kd, k.strides[1], k.Count(1),
+                                           qd, q.strides[1], q.Count(1) * group,
+                                           &beta,
+                                           qk, k1, k1 * q1 * group, q0 / group);
+        if (status != HIPBLAS_STATUS_SUCCESS) {
+            printf("status = %d\n", (int) status);
+            printf("Error: cublas error.\n");
+            throw ("cublas error");
+            exit(0);
+        }
+
+        if (maskd) {
+            int spatial = q1 * k1, n = batch, m = q0 / batch;
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmAttentionMaskKernel<256>), dim3(n * m), dim3(256), 0, 0, qk, maskd, -10000, n, m, spatial);
+        }
+
+        int outer = q0 * q1;
+        if (k1 < 8) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<1>), dim3(outer), dim3(1 ), 0, 0, qk, temp, outer, k1);
+        } else if (k1 < 64) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<8>), dim3(outer), dim3(8 ), 0, 0, qk, temp, outer, k1);
+        } else if (k1 < 512) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<64>), dim3(outer), dim3(64 ), 0, 0, qk, temp, outer, k1);
+        } else {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelInner1<256>), dim3(outer), dim3(256 ), 0, 0, qk, temp, outer, k1);
+        }
+
+        status = hipblasSgemmStridedBatched(fastllmCublasHandle,
+                                           HIPBLAS_OP_N, HIPBLAS_OP_N,
+                                           v2, q1 * group, k1, &one,
+                                           vd, v.strides[1], v.Count(1),
+                                           temp, k1, k1 * q1 * group,
+                                           &beta,
+                                           od, v2, v2 * q1 * group, q0 / group);
+        if (status != HIPBLAS_STATUS_SUCCESS) {
+            printf("status = %d\n", (int) status);
+            printf("Error: cublas error.\n");
+            throw ("cublas error");
+            exit(0);
+        }
+        FastllmCudaFree(qk);
+        FastllmCudaFree(temp);
+        DeviceSync();
+        return true;
+    }
+    return true;
+}
+
 bool FastllmCudaBatchMatMul(const fastllm::Data &input0, const fastllm::Data &input1, fastllm::Data &output,
                             int input0Spatial, int input1Spatial, int outputSpatial,
                             int input0Stride, int input1Stride,
@@ -1751,7 +2151,7 @@ bool FastllmCudaRotatePosition2D(fastllm::Data &data, const fastllm::Data &posit
     int spatial = data.Count(2);
     int len = data.dims[0], bs = data.dims[1];
     int n = data.dims[2], m = data.dims[3];
-    hipLaunchKernelGGL(FastllmRotatePosition2DKernel, dim3(outer * 2 * n), min(rotaryDim, m / 4), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
+    hipLaunchKernelGGL(FastllmRotatePosition2DKernel, dim3(outer * 2 * n), dim3(min(rotaryDim, m / 4)), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
                                                                                 len, bs, spatial, n, m,
                                                                                 (int)positionIds.dims.back(), (int)sinData.dims[1], rotaryDim);
 
@@ -1774,7 +2174,7 @@ bool FastllmCudaNearlyRotatePosition2D(fastllm::Data &data, const fastllm::Data 
     int spatial = data.Count(2);
     int len = data.dims[0], bs = data.dims[1];
     int n = data.dims[2], m = data.dims[3];
-    hipLaunchKernelGGL(FastllmNearlyRotatePosition2DKernel, dim3(outer * n), min(rotaryDim, m / 4), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
+    hipLaunchKernelGGL(FastllmNearlyRotatePosition2DKernel, dim3(outer * n), dim3(min(rotaryDim, m / 4)), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
                                                                                   len, bs, spatial, n, m,
                                                                                   (int)positionIds.dims.back(), (int)sinData.dims[1], rotaryDim);
 
@@ -1796,7 +2196,7 @@ bool FastllmCudaLlamaRotatePosition2D(fastllm::Data &data, const fastllm::Data &
     int spatial = data.Count(2);
     int bs = data.dims[0], len = data.dims[1];
     int n = data.dims[2], m = data.dims[3];
-    hipLaunchKernelGGL(FastllmLlamaRotatePosition2DKernel, dim3(outer * n), min(rotaryDim, m / 2), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
+    hipLaunchKernelGGL(FastllmLlamaRotatePosition2DKernel, dim3(outer * n), dim3(min(rotaryDim, m / 2)), 0, 0, cudaData, cudaPositionIds, cudaSin, cudaCos,
                                                                                  len, bs, spatial, n, m,
                                                                                  (int)positionIds.dims.back(), (int)sinData.dims[1], rotaryDim);
 
@@ -1816,6 +2216,157 @@ bool FastllmCudaApplyLognAttn (fastllm::Data &input, fastllm::Data &lognAttn, fa
     int spatial = input.Count(2);
 
     hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmApplyLognAttnKernel<256>), dim3(batch * seqLen), dim3(256), 0, 0, inputData, lognData, posData, batch, seqLen, spatial);
+    return true;
+}
+
+bool FastllmCudaAttentionBatch(fastllm::Data **q, fastllm::Data **k, fastllm::Data **v,
+                               fastllm::Data **mask, fastllm::Data **output, int group, float scale, int batch) {
+    int k0 = k[0]->dims[0];
+    size_t memSum = 0;
+    for (int b = 0; b < batch; b++) {
+        memSum += q[b]->dims[0] * q[b]->dims[1] * k[b]->dims[1];
+    }
+    float *mem = (float*) FastllmCudaMalloc(memSum * sizeof(float));
+    float **qk = new float*[batch];
+    memSum = 0;
+    for (int b = 0; b < batch; b++) {
+        int s = q[b]->dims[0] * q[b]->dims[1] * k[b]->dims[1];
+        qk[b] = mem + memSum;
+        memSum += s;
+    }
+
+    if (true) {
+        uint8_t ** pointers = (uint8_t**)FastllmCudaMalloc(sizeof(uint8_t*) * batch * k0 * 8);
+        uint8_t ** cpuPointers = new uint8_t*[batch * k0 * 8];
+        for (int b = 0; b < batch; b++) {
+            for (int i = 0; i < k0; i++) {
+                cpuPointers[(b * k0 + i) * 8 + 0] = (uint8_t *) q[b]->cudaData + i * group * q[b]->dims[1] * q[b]->dims[2] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 1] = (uint8_t *) k[b]->cudaData + i * k[b]->strides[0] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 2] = (uint8_t *) qk[b] + i * group * q[b]->dims[1] * k[b]->dims[1] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 3] = (uint8_t *) (size_t) (group * q[b]->dims[1]);
+                cpuPointers[(b * k0 + i) * 8 + 4] = (uint8_t *) (size_t) q[b]->dims[2];
+                cpuPointers[(b * k0 + i) * 8 + 5] = (uint8_t *) (size_t) k[b]->dims[1];
+                cpuPointers[(b * k0 + i) * 8 + 6] = (uint8_t *) (size_t) q[b]->strides[1];
+                cpuPointers[(b * k0 + i) * 8 + 7] = (uint8_t *) (size_t) k[b]->strides[1];
+            }
+        }
+        hipMemcpy(pointers, cpuPointers, sizeof(uint8_t*) * batch * k0 * 8, hipMemcpyHostToDevice);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmMatMulTransBBatchKernel<128>), dim3(batch * k0), dim3(128), 0, 0, pointers, scale);
+        FastllmCudaFree(pointers);
+        delete[] cpuPointers;
+    }
+    if (true) {
+        int total = 0;
+        for (int b = 0; b < batch; b++) {
+            int outer = q[b]->dims[0] * q[b]->dims[1];
+            total += outer;
+        }
+        uint8_t ** pointers = (uint8_t**)FastllmCudaMalloc(sizeof(uint8_t*) * total * 3);
+        uint8_t ** cpuPointers = new uint8_t*[total * 3];
+        int cur = 0;
+        for (int b = 0; b < batch; b++) {
+            int outer = q[b]->dims[0] * q[b]->dims[1];
+            int channels = k[b]->dims[1];
+            for (int o = 0; o < outer; o++) {
+                cpuPointers[cur * 3 + 0] = (uint8_t*)(qk[b] + o * channels);
+                cpuPointers[cur * 3 + 1] = (uint8_t*)(qk[b] + o * channels);
+                cpuPointers[cur * 3 + 2] = (uint8_t*)((size_t)channels);
+                cur++;
+            }
+        }
+        hipMemcpy(pointers, cpuPointers, sizeof(uint8_t*) * total * 3, hipMemcpyHostToDevice);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmSoftmaxKernelBatchInner1<256>), dim3(total), dim3(256), 0, 0, pointers);
+
+        FastllmCudaFree(pointers);
+        delete[] cpuPointers;
+    }
+    if (true) {
+        uint8_t ** pointers = (uint8_t**)FastllmCudaMalloc(sizeof(uint8_t*) * batch * k0 * 8);
+        uint8_t ** cpuPointers = new uint8_t*[batch * k0 * 8];
+        for (int b = 0; b < batch; b++) {
+            for (int i = 0; i < k0; i++) {
+                cpuPointers[(b * k0 + i) * 8 + 0] = (uint8_t *) qk[b] + i * group * q[b]->dims[1] * k[b]->dims[1] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 1] = (uint8_t *) v[b]->cudaData + i * v[b]->strides[0] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 2] = (uint8_t *) output[b]->cudaData + i * group * q[b]->dims[1] * v[b]->dims[2] * sizeof(float);
+                cpuPointers[(b * k0 + i) * 8 + 3] = (uint8_t *) (size_t) (group * q[b]->dims[1]);
+                cpuPointers[(b * k0 + i) * 8 + 4] = (uint8_t *) (size_t) k[b]->dims[1];
+                cpuPointers[(b * k0 + i) * 8 + 5] = (uint8_t *) (size_t) v[b]->dims[2];
+                cpuPointers[(b * k0 + i) * 8 + 6] = (uint8_t *) (size_t) k[b]->dims[1];
+                cpuPointers[(b * k0 + i) * 8 + 7] = (uint8_t *) (size_t) v[b]->strides[1];
+            }
+        }
+        hipMemcpy(pointers, cpuPointers, sizeof(uint8_t*) * batch * k0 * 8, hipMemcpyHostToDevice);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmMatMulKernel<128>), dim3(batch * k0), dim3(128), 0, 0, pointers, 1.0f);
+        FastllmCudaFree(pointers);
+        delete[] cpuPointers;
+    }
+
+    FastllmCudaFree(mem);
+    delete[] qk;
+/*
+    {
+        const int params = 16;
+        float **pointers = (float **) FastllmCudaMalloc(sizeof(float *) * batch * params);
+        float **cpuPointers = new float *[batch * params];
+
+        float **qk = new float *[batch];
+        float **temp = new float *[batch];
+        for (int b = 0; b < batch; b++) {
+            qk[b] = (float *) FastllmCudaMalloc(q[b]->dims[0] * k[b]->dims[1] * sizeof(float));
+            temp[b] = (float *) FastllmCudaMalloc(q[b]->dims[0] * k[b]->dims[1] * sizeof(float));
+
+            cpuPointers[b * params + 0] = (float *) q[b]->cudaData;
+            cpuPointers[b * params + 1] = (float *) k[b]->cudaData;
+            cpuPointers[b * params + 2] = (float *) v[b]->cudaData;
+            cpuPointers[b * params + 3] = (mask[b] && mask[b]->dims.size() > 0) ? (float *) mask[b]->cudaData : nullptr;
+            cpuPointers[b * params + 4] = (float *) output[b]->cudaData;
+            cpuPointers[b * params + 5] = (float *) (unsigned long long) q[b]->dims[1];
+            cpuPointers[b * params + 6] = (float *) (unsigned long long) q[b]->dims[2];
+            cpuPointers[b * params + 7] = (float *) (unsigned long long) k[b]->dims[1];
+            cpuPointers[b * params + 8] = (float *) (unsigned long long) v[b]->dims[2];
+            cpuPointers[b * params + 9] = (float *) (unsigned long long) q[b]->strides[0];
+            cpuPointers[b * params + 10] = (float *) (unsigned long long) k[b]->strides[0];
+            cpuPointers[b * params + 11] = (float *) (unsigned long long) v[b]->strides[0];
+            cpuPointers[b * params + 12] = (float *) (unsigned long long) output[b]->strides[0];
+            cpuPointers[b * params + 13] = (float *) (unsigned long long) qk[b];
+            cpuPointers[b * params + 14] = (float *) (unsigned long long) temp[b];
+            cpuPointers[b * params + 15] = (float *) (unsigned long long) q[b]->dims[0];
+        }
+
+        hipMemcpy(pointers, cpuPointers, sizeof(float *) * batch * params, hipMemcpyHostToDevice);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmAttentionBatchKernel<256>), dim3(batch), dim3(256 ), 0, 0, pointers, scale, group);
+
+        for (int i = 0; i < batch; i++) {
+            FastllmCudaFree(qk[i]);
+            FastllmCudaFree(temp[i]);
+        }
+        delete[] qk;
+        delete[] temp;
+
+        FastllmCudaFree(pointers);
+        delete[] cpuPointers;
+    }
+*/
+/*
+    for (int b = 0; b < batch; b++) {
+        int q0 = q[b]->dims[0], q1 = q[b]->dims[1], q2 = q[b]->dims[2], k0 = k[b]->dims[0], k1 = k[b]->dims[1], v2 = v[b]->dims[2];
+        float *qd = (float *) q[b]->cudaData;
+        float *kd = (float *) k[b]->cudaData;
+        float *vd = (float *) v[b]->cudaData;
+        float *maskd = (mask[b] && mask[b]->dims.size() > 0) ? (float *) mask[b]->cudaData : nullptr;
+        float *od = (float *) output[b]->cudaData;
+        int maskBatch = (mask[b] && mask[b]->dims.size() > 0) ? mask[b]->dims[0] : 1;
+
+        float *qk = (float *) FastllmCudaMalloc(q0 * k1 * sizeof(float));
+        float *temp = (float *) FastllmCudaMalloc(q0 * k1 * sizeof(float));
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(FastllmAttentionKernel<256>), dim3(q0), dim3(256), 0, 0, qd, kd, vd, maskd, od,
+                                                  scale, q1, q2, k1, v2,
+                                                  group, q[b]->strides[0], k[b]->strides[0], v[b]->strides[0],
+                                                  output[b]->strides[0],
+                                                  qk, temp);
+    }
+*/
+    DeviceSync();
     return true;
 }
 
