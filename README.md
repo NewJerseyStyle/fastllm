@@ -2,6 +2,8 @@
 
 ## 介绍
 
+> ⚠️ 開發中，目前本代碼庫沒有就 ROCm 平台釋出穩定版本，敬請注意
+
 fastllm是纯c++实现，无第三方依赖的高性能大模型推理库
 
 6~7B级模型在安卓端上也可以流畅运行
@@ -25,6 +27,8 @@ fastllm是纯c++实现，无第三方依赖的高性能大模型推理库
 
 ## 两行代码加速 （测试中，暂时只支持ubuntu）
 
+> 如果使用 AMD GPU 編譯，使用對應 `<rocm-version>` 版本的 `rocm/dev-ubuntu-20.04:<rocm-version>-complete` 的 Docker image
+
 使用如下命令安装fastllm_pytools包
 
 ``` sh
@@ -32,9 +36,11 @@ cd fastllm
 mkdir build
 cd build
 cmake .. -DUSE_CUDA=ON # 如果不使用GPU编译，那么使用 cmake .. -DUSE_CUDA=OFF
+#CXX=/usr/bin/hipcc cmake .. -DUSE_ROCM=ON -DCMAKE_MODULE_PATH=/opt/rocm/hip/cmake -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc
 make -j
 cd tools && python setup.py install
 ```
+
 
 然后只需要在原本的推理程序中加入两行即可使用fastllm加速
 

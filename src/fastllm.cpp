@@ -33,6 +33,9 @@
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 
 namespace fastllm {
     std::map <std::string, int> defaultDeviceMap;
@@ -369,7 +372,7 @@ namespace fastllm {
         if (this->dataDevice == DataDevice::CPU) {
             this->cpuData = new uint8_t[this->expansionBytes];
         } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             if (this->directMemory) {
                 this->cudaData = FastllmCudaDirectMalloc(this->expansionBytes);
             } else {
@@ -387,7 +390,7 @@ namespace fastllm {
         if (this->dataDevice == DataDevice::CPU) {
             delete[] this->cpuData;
         } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             if (this->directMemory) {
                 FastllmCudaDirectFree(this->cudaData);
             } else {
@@ -473,7 +476,7 @@ namespace fastllm {
                 }
                 delete[] old;
             } else if (this->dataDevice == DataDevice::CUDA) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                 uint8_t *old = (uint8_t*)this->cudaData;
                 MallocSpace(this->strides[0] * std::max(this->dims[0], dims[0]));
                 int outer = this->Count(0) / this->Count(axis);
@@ -497,7 +500,7 @@ namespace fastllm {
 #ifndef USE_MMAP
         delete[] this->cpuData;
 #endif
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         if (this->cudaData != nullptr) {
             FastllmCudaFree(this->cudaData);
             /*if (this->directMemory) {
@@ -681,7 +684,7 @@ namespace fastllm {
         }
 
         if (this->expansionBytes != 0) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             if (this->dataDevice == DataDevice::CPU) {
                 if (device == DataDevice::CUDA) {
                     FastllmCudaSetDevice(deviceIds.size() == 0 ? 0 : deviceIds[0]);

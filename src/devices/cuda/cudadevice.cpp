@@ -5,7 +5,13 @@
 #include "devices/cpu/cpudevice.h"
 #include "devices/cuda/cudadevice.h"
 
+#if defined(USE_ROCM)
+#include "fastllm-cuda.h"
+#elif defined(USE_CUDA)
 #include "fastllm-cuda.cuh"
+#else
+#error GPU support enabled while ROCM/CUDA disabled, marco/definition/CMakeLists something wrong
+#endif
 
 #include "utils.h"
 

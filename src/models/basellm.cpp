@@ -7,6 +7,9 @@
 #include <sstream>
 #include <cstring>
 
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
@@ -56,7 +59,7 @@ namespace fastllm {
     
     std::string basellm::Response(const std::string &input, RuntimeResult retCb,
                                   const fastllm::GenerationConfig &generationConfig) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         FastllmCudaClearBigBuffer();
 #endif
         std::string prompt = input;
@@ -140,7 +143,7 @@ namespace fastllm {
 
     void basellm::ResponseBatch(const std::vector<std::string> &inputs, std::vector<std::string> &outputs,
                                 RuntimeResultBatch retCb, const fastllm::GenerationConfig &generationConfig) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         FastllmCudaClearBigBuffer();
 #endif
         
@@ -628,7 +631,7 @@ printf("%d / %d\n", endingCount, batch);
                                 pastKeyValue1 = &model->responseContextDict.dicts[handles[0]]->pastKeyValues;
                             }
                             model->dictLocker.unlock();
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                             FastllmCudaClearBigBuffer();
 #endif
                             Data inputIds = Data(DataType::FLOAT32, {1, (int) ids.size()}, ids);

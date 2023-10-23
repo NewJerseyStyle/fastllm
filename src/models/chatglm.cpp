@@ -20,6 +20,9 @@
 
 #include <cstring>
 
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
@@ -192,7 +195,7 @@ namespace fastllm {
             PermuteSelf(v, {1, 0, 2});
 
             int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             unitLen = 128;
 #endif
             while ((pastKey.dims.size() == 0 &&
@@ -513,7 +516,7 @@ namespace fastllm {
                 pastValue.ToDevice(DataDevice::CUDA);
 
                 int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                 unitLen = 128;
 #endif
                 while ((pastKey.dims.size() == 0 &&

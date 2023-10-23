@@ -12,11 +12,15 @@
 #include "devices/cuda/cudadevice.h"
 #include "devices/cuda/fastllm-cuda.cuh"
 #endif
+#ifdef USE_ROCM
+#include "devices/cuda/cudadevice.h"
+#include "devices/cuda/fastllm-cuda.h"
+#endif
 
 namespace fastllm {
     Executor::Executor() {
         this->devices.clear();
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         this->devices.push_back((BaseDevice*) new CudaDevice());
 #endif
         this->devices.push_back((BaseDevice*) new CpuDevice());
@@ -80,7 +84,7 @@ namespace fastllm {
                 continue;
             }
             if (device->CanRun(opType, datas, floatParams, intParams)) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                 if (device->deviceType == "cuda" && device->deviceIds.size() > 0) {
                     FastllmCudaSetDevice(device->deviceIds[0]);
                 }

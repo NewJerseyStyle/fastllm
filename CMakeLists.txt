@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.5)
 project(fastllm LANGUAGES CXX)
 
 option(USE_CUDA "use cuda" OFF)
+option(USE_ROCM "use rocm" OFF)
 
 option(PY_API "python api" OFF)
 option(USE_MMAP "use mmap" OFF)
@@ -53,6 +54,32 @@ if (USE_CUDA)
     set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp src/devices/cuda/fastllm-cuda.cu)
     set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cublas)
     set(CMAKE_CUDA_ARCHITECTURES "native")
+endif()
+
+if (USE_ROCM)
+    list(APPEND CMAKE_PREFIX_PATH /opt/rocm/hip /opt/rocm)
+
+    find_package(HIP REQUIRED)
+    find_package(HIPBLAS REQUIRED)
+    find_package(ROCBLAS REQUIRED)
+
+    if(${HIPBLAS_FOUND} AND ${HIP_FOUND})
+        message(STATUS "HIP and hipBLAS found")
+        add_compile_definitions(GGML_USE_HIPBLAS GGML_USE_CUBLAS)
+        add_compile_definitions(__HIP_PLATFORM_AMD__)
+        add_compile_definitions(USE_ROCM)
+        
+        set(CMAKE_HIP_ARCHITECTURES "gfx900") #vega56
+        set(DEPENDENCIES roc::hipblas)
+
+        include_directories(include/devices/cuda)
+        ###message(${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+        set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp src/devices/cuda/fastllm-cuda.cpp)
+        set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} hip::device hip::host roc::rocblas roc::hipblas)
+        set(CMAKE_CUDA_ARCHITECTURES "native")
+    else()
+        message(WARNING "hipBLAS or HIP not found. Try setting CMAKE_PREFIX_PATH=/opt/rocm")
+    endif()
 endif()
 
 if (PY_API)

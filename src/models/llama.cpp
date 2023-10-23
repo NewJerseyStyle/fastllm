@@ -12,6 +12,9 @@
 
 #include <cstring>
 
+#ifdef USE_ROCM
+#include "fastllm-cuda.h"
+#endif
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
@@ -153,7 +156,7 @@ namespace fastllm {
             }
 
             int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             unitLen = 128;
 #endif
             while ((pastKey.dims.size() == 0 && (pastKey.expansionDims.size() == 0 || k.dims[1] > pastKey.expansionDims[1]))
@@ -315,7 +318,7 @@ namespace fastllm {
             }
 
             int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
             unitLen = 128;
 #endif
             while ((pastKey.dims.size() == 0 && (pastKey.expansionDims.size() == 0 || k.dims[1] > pastKey.expansionDims[1]))
@@ -501,7 +504,7 @@ namespace fastllm {
                 }
                 
                 int unitLen = 64;
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                 unitLen = 128;
 #endif
                 while ((pastKey.dims.size() == 0 &&
@@ -595,7 +598,7 @@ namespace fastllm {
 
     std::string LlamaModel::Response(const std::string& input, RuntimeResult retCb,
                                      const GenerationConfig &generationConfig) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         FastllmCudaClearBigBuffer();
 #endif
 //auto st = std::chrono::system_clock::now();
@@ -707,7 +710,7 @@ namespace fastllm {
     void LlamaModel::ResponseBatch(const std::vector<std::string> &inputs, std::vector<std::string> &outputs,
                                    RuntimeResultBatch retCb,
                                    const GenerationConfig &generationConfig) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
         FastllmCudaClearBigBuffer();
 #endif
 #ifdef PY_API
@@ -975,7 +978,7 @@ namespace fastllm {
                         }
 
                         if (seqLens.size() > 0) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
                             FastllmCudaClearBigBuffer();
 #endif
                             Data inputIds = Data(DataType::FLOAT32, {1, (int) ids.size()}, ids);
