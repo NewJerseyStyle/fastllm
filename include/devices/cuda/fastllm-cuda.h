@@ -9,6 +9,8 @@ void FastllmCudaMallocBigBuffer(size_t size);
 void FastllmCudaClearBigBuffer();
 void *FastllmCudaMalloc(size_t size);
 void FastllmCudaFree(void *ret);
+void * FastllmCudaDirectMalloc(size_t size);
+void FastllmCudaDirectFree(void *ret);
 
 void FastllmCudaCopyFromHostToDevice(void *dst, void *src, size_t size);
 void FastllmCudaCopyFromDeviceToHost(void *dst, void *src, size_t size);
@@ -19,7 +21,8 @@ void FastllmCudaMemcpy2DDeviceToDevice(void * 	dst, size_t 	dpitch, const void *
 void FastllmCudaMemcpy2DDeviceToDeviceBatch(void ** 	dsts, size_t *	dpitchs, void ** 	srcs,
                                        size_t *	spitchs, size_t *widths, size_t *	heights,
                                        int batch);
-
+bool FastllmCudaAttention(const fastllm::Data &q, const fastllm::Data &k, const fastllm::Data &v,
+                          const fastllm::Data &mask, const fastllm::Data &output, int group, float scale);
 bool FastllmCudaGeluNew(const fastllm::Data &input, fastllm::Data &output);
 bool FastllmCudaSilu(const fastllm::Data &input, fastllm::Data &output);
 bool FastllmCudaSwiglu(const fastllm::Data &input, fastllm::Data &output);
@@ -54,6 +57,8 @@ bool FastllmCudaLlamaRotatePosition2D(fastllm::Data &data, const fastllm::Data &
                                  const fastllm::Data &sinData, const fastllm::Data &cosData, int rotaryDim);
 bool FastllmCudaApplyLognAttn (fastllm::Data &input, fastllm::Data &lognAttn, fastllm::Data &positionIds);
 
+bool FastllmCudaAttentionBatch(fastllm::Data **q, fastllm::Data **k, fastllm::Data **v,
+                          fastllm::Data **mask, fastllm::Data **output, int group, float scale, int batch);
 bool FastllmCudaSplitBatch(fastllm::Data &input, fastllm::Data **outputs, int axis);
 bool FastllmCudaCatBatch(fastllm::Data **inputs, fastllm::Data &output, int axis);
 bool FastllmCudaMulBatch(fastllm::Data **inputs, float v, int batch, fastllm::Data **outputs);
