@@ -1,8 +1,9 @@
-# fastllm
+# fastllm ROCm (Abandoned)
 
 ## 介绍
 
 > ⚠️ 開發中，目前本代碼庫沒有就 ROCm 平台釋出穩定版本，敬請注意
+> 🚧 ROCm 部分依然不可用，本代碼庫已經廢棄
 
 fastllm是纯c++实现，无第三方依赖的高性能大模型推理库
 
